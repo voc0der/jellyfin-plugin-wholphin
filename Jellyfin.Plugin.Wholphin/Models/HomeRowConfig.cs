@@ -38,6 +38,9 @@ public abstract class HomeRowConfig
 
     [JsonPropertyName("viewOptions")]
     public HomeRowViewOptions ViewOptions { get; set; }
+
+    [JsonPropertyName("range")]
+    public string? Range { get; set; }
 }
 
 public class ContinueWatching : HomeRowConfig { }
