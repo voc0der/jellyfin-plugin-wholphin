@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -58,12 +59,41 @@ public class WholphinController : ControllerBase
             //   DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
             // };
             // return new JsonResult(settings, options);
-            return settings;
+            return new HomePageSettings
+            {
+                Version = settings.Version,
+                Rows = settings.Rows.Where(IsActive).ToArray(),
+            };
         }
         else
         {
             return null;
         }
+    }
+
+    private static bool IsActive(HomeRowConfig row)
+    {
+        if (string.IsNullOrWhiteSpace(row.Range))
+        {
+            return true;
+        }
+
+        var now = DateTime.Today;
+        var today = new DateTime(2000, now.Month, now.Day);
+        var days = row
+            .Range.Split('-')
+            .Select(d =>
+                DateTime.ParseExact(
+                    d + " 2000",
+                    "MMMd yyyy",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces
+                )
+            )
+            .ToArray();
+        return days[0] <= days[^1]
+            ? days[0] <= today && today <= days[^1]
+            : days[0] <= today || today <= days[^1];
     }
 
     [HttpGet("config")]
