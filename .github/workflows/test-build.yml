@@ -66,10 +66,20 @@ jobs:
           dotnet publish "$NAME" --configuration Release \
             -p:Version="$VERSION" -p:AssemblyVersion="$VERSION" -p:FileVersion="$VERSION"
 
+      # The plugin names itself "Wholphin" but the manifest says "Wholphin Companion". Jellyfin keeps
+      # a name shipped in meta.json and drops older versions with the same name at startup. Without
+      # it, an update leaves the old version loaded and the update task reinstalls on every start.
       - name: Zip
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ABI: ${{ steps.version.outputs.abi }}
         run: |
-          mkdir -p dist
-          find "$NAME/bin/Release/net10.0/publish" -type f -name "*.dll" -print0 | xargs -0 zip -j "dist/$NAME.zip"
+          mkdir -p dist package
+          find "$NAME/bin/Release/net10.0/publish" -type f -name "*.dll" -exec cp {} package/ \;
+          jq -n --arg version "$VERSION" --arg targetAbi "$ABI" \
+            '{guid: "00E68C90-8840-48D0-AD65-0A5D58249652", name: "Wholphin", version: $version, targetAbi: $targetAbi, autoUpdate: true}' \
+            > package/meta.json
+          zip -j "dist/$NAME.zip" package/*
 
       - name: Manifest entry
         env:
