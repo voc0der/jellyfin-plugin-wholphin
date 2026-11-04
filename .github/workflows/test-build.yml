@@ -1,0 +1,152 @@
+name: Test build
+
+# Every push to the test branch is released on this fork and added to a Jellyfin plugin
+# repository on GitHub Pages: https://voc0der.github.io/jellyfin-plugin-wholphin/manifest.json
+on:
+  push:
+    branches:
+      - test/pr-7-8
+
+permissions: {}
+
+concurrency:
+  group: test-build
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NAME: Jellyfin.Plugin.Wholphin
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test
+        run: dotnet test "$NAME.Tests"
+
+      # Upstream's version with the run number as the fourth part. A test build outranks
+      # the upstream release it is built on, and the next upstream release that bumps the
+      # version outranks every test build, so Jellyfin moves back to upstream on its own.
+      - name: Version
+        id: version
+        run: |
+          base=$(sed -n 's|.*<Version>\(.*\)</Version>.*|\1|p' Directory.Build.props)
+          IFS=. read -r major minor build _ <<< "$base"
+          version="$major.$minor.$build.$GITHUB_RUN_NUMBER"
+          abi=$(sed -n 's|.*Include="Jellyfin.Controller" Version="\([^"]*\)".*|\1|p' "$NAME/$NAME.csproj")
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$abi" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+          {
+            echo "version=$version"
+            echo "tag=test-$version"
+            echo "abi=$abi"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dotnet publish "$NAME" --configuration Release \
+            -p:Version="$VERSION" -p:AssemblyVersion="$VERSION" -p:FileVersion="$VERSION"
+
+      - name: Zip
+        run: |
+          mkdir -p dist
+          find "$NAME/bin/Release/net10.0/publish" -type f -name "*.dll" -print0 | xargs -0 zip -j "dist/$NAME.zip"
+
+      - name: Manifest entry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          ABI: ${{ steps.version.outputs.abi }}
+        run: |
+          jq -n \
+            --arg version "$VERSION" \
+            --arg changelog "Test build of $GITHUB_REF_NAME at $(git log -1 --format='%h: %s')" \
+            --arg targetAbi "$ABI" \
+            --arg sourceUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$NAME.zip" \
+            --arg checksum "$(md5sum "dist/$NAME.zip" | cut -d' ' -f1)" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '$ARGS.named' > dist/version.json
+          cat dist/version.json
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "dist/$NAME.zip" dist/version.json
+          else
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
+              --title "Test build $VERSION" --notes "$(jq -r .changelog dist/version.json)" \
+              "dist/$NAME.zip" dist/version.json
+          fi
+
+  pages:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}manifest.json
+    steps:
+      # Rebuilt from every test release rather than appended to the last deploy, so a
+      # failed or cancelled run can't leave a published build out of the manifest.
+      - name: Manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          mkdir -p entries site
+          gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName | select(startswith("test-"))' |
+            while read -r tag; do
+              gh release download "$tag" --pattern version.json --output "entries/$tag.json"
+            done
+          jq -s \
+            --arg overview "Test builds of $GITHUB_REF_NAME from $GITHUB_REPOSITORY" \
+            '[{
+              guid: "00E68C90-8840-48D0-AD65-0A5D58249652",
+              name: "Wholphin Companion",
+              description: "Provides additional functionality to Wholphin",
+              overview: $overview,
+              owner: "voc0der",
+              imageUrl: "https://raw.githubusercontent.com/damontecres/Wholphin/refs/heads/main/app/src/main/ic_launcher-playstore.png",
+              category: "General",
+              versions: (sort_by(.version | split(".") | map(tonumber)) | reverse)
+            }]' entries/*.json > site/manifest.json
+          jq -e --arg v "$VERSION" 'any(.[0].versions[]; .version == $v)' site/manifest.json > /dev/null
+          cat site/manifest.json
+
+      - name: Upload
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
