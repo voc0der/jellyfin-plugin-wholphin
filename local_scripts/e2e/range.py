@@ -223,13 +223,55 @@ check("After restart the admin YAML still has every range",
       s == 200 and (b or {}).get("Result", "").count("range:") == sum(1 for c in CASES2 if c[2] is not None),
       f"{s} {(b or {}).get('Result')}")
 
-# --- Known trade-off: a malformed range is not rejected on save, and the endpoint fails -----------
-s, b = call("POST", "/wholphin/config/home", admin, body={"Value": "version: 1\nrows:\n  - type: NextUp\n    range: oct15-octXX\n"},
+# --- Invalid ranges: both save paths refuse them; Wholphin keeps getting the old rows --------------
+BAD = "oct15-octXX"
+SEERR_URL = "https://seerr.example.com"
+_, _, before, _ = shown(alice, "e2e-alice2")
+s, b = call("POST", "/wholphin/config/home", admin, body={"Value": f"version: 1\nrows:\n  - type: NextUp\n    range: {BAD}\n"},
             device="e2e-admin2")
-check("Malformed range: save is accepted (no extra validation)", s == 200, f"{s} {b}")
-s, body, got, rows = shown(alice, "e2e-alice2")
-print(f"Malformed range: homesettings answers {s}")
-check("Malformed range: homesettings fails with 500, so Wholphin falls back to its own default rows", s == 500, f"{s} {body}")
+check("Invalid range: /wholphin/config/home refuses it with a 400 naming the row",
+      s == 400 and f"Home row 1 has an invalid range '{BAD}'" in str(b), f"{s} {b}")
+s, cfg = call("GET", f"/Plugins/{PLUGIN_ID}/Configuration", admin, device="e2e-admin2")
+cfg["HomeConfig"]["HomePageSettings"]["rows"][0]["range"] = BAD
+s, b = call("POST", f"/Plugins/{PLUGIN_ID}/Configuration", admin, body=cfg, device="e2e-admin2")
+print(f"The settings page's save of {BAD} answers {s} {b!r}")
+check("Invalid range: the plugin configuration endpoint (settings page) refuses it with a 400", s == 400, f"{s} {b}")
+s, _, after, _ = shown(alice, "e2e-alice2")
+check("Invalid range: after the refused saves Wholphin gets the same rows", s == 200 and after == before,
+      f"{s} {after} vs {before}")
+s, b = call("POST", "/wholphin/config/seerr", admin, device="e2e-admin2",
+            body={"Value": f"serverUrl: {SEERR_URL}\nlogin:\n  type: ApiKey\n  apiKey: e2e-key\n"})
+check("Seerr settings save while every stored range is valid", s == 200, f"{s} {b}")
+s, b = call("GET", "/wholphin/seerrsettings", alice, device="e2e-alice2")
+check("Wholphin gets the saved Seerr settings", s == 200 and isinstance(b, dict) and b.get("serverUrl") == SEERR_URL, f"{s} {b}")
+
+# --- A bad range already stored (saved by an older build, or the XML edited by hand) -------------
+CONFIG_XML = "/config/plugins/configurations/Jellyfin.Plugin.Wholphin.xml"
+idx = next(i for i, c in enumerate(CASES2) if c[0] == "starts today")
+good = CASES2[idx][2]
+subprocess.run(["docker", "exec", JF, "sed", "-i", f"s|<Range>{good}</Range>|<Range>{BAD}</Range>|", CONFIG_XML], check=True)
+subprocess.run(["docker", "restart", JF], capture_output=True, check=True)
+time.sleep(3)
+wait_for_jellyfin()
+alice = login("alice", "alice-pass", "e2e-alice3")
+admin = login("admin", "admin-pass", "e2e-admin3")
+stored = subprocess.run(["docker", "exec", JF, "cat", CONFIG_XML], capture_output=True, text=True).stdout
+check(f"Stored invalid range: row {idx + 1} has {BAD} in the XML config Jellyfin loaded", f"<Range>{BAD}</Range>" in stored)
+CASES3 = list(CASES2)
+CASES3[idx] = (f"starts today -> {BAD} in the stored XML", "ByParent", BAD, False)
+check_filtering("stored invalid range", CASES3, keys, alice, "e2e-alice3")
+logs = subprocess.run(["docker", "logs", JF], capture_output=True, text=True)
+check("Stored invalid range: Jellyfin logs a warning naming it",
+      f"Skipping home row with invalid date range: {BAD}" in logs.stdout + logs.stderr)
+s, b = call("POST", "/wholphin/config/seerr", admin, body={"Value": f"serverUrl: {SEERR_URL}\n"}, device="e2e-admin3")
+check(f"Stored invalid range: Seerr save is refused with a 400 naming row {idx + 1}",
+      s == 400 and f"Home row {idx + 1} has an invalid range '{BAD}'" in str(b), f"{s} {b}")
+s, cfg = call("GET", f"/Plugins/{PLUGIN_ID}/Configuration", admin, device="e2e-admin3")
+cfg["HomeConfig"]["HomePageSettings"]["rows"][idx]["range"] = good
+s, b = call("POST", f"/Plugins/{PLUGIN_ID}/Configuration", admin, body=cfg, device="e2e-admin3")
+check("Stored invalid range: fixing it through the settings page saves", s in (200, 204), f"{s} {b}")
+s, _, after, _ = shown(alice, "e2e-alice3")
+check("Stored invalid range: after the fix Wholphin gets every row again", s == 200 and after == before, f"{s} {after} vs {before}")
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
